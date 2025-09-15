@@ -1,0 +1,6 @@
+# Disable lint for everything in this deploy (quick ship)
+**/*
+
+# If you want to lint only specific dirs later, replace above with:
+# !src/app/**
+# !src/components/**

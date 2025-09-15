@@ -1,0 +1,11 @@
+
+.paymint_secret
+.env
+.vercel
+.env
+.env.*
+!.env.example
+.paymint_secret
+.paymint_tx
+.next/
+.vercel/

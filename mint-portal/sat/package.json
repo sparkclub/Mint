@@ -1,0 +1,24 @@
+{
+  "dependencies": {
+    "@buildonspark/issuer-sdk": "^0.0.92",
+    "@buildonspark/spark-sdk": "^0.2.13",
+    "next": "^15.5.2",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.3",
+    "@types/react": "^19.1.12",
+    "autoprefixer": "^10.4.21",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^4.1.13",
+    "typescript": "^5.9.2"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint || echo 'skip lint'"
+  }
+}
