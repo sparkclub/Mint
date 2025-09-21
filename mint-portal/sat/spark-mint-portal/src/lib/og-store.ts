@@ -1,13 +1,16 @@
+// src/lib/og-store.ts
 import { promises as fsp } from "fs";
 import { join } from "path";
 import { createHash } from "crypto";
+import { canonicalSparkAddress } from "./validate";
 
 function baseDir() {
   return String(process.env.PAYMINT_OGLOCK_DIR || ".paymint_og");
 }
 function keyOf(addr: string) {
-  const h = createHash("sha256").update(addr.toLowerCase()).digest("hex").slice(0, 24);
-  return `${addr.toLowerCase()}__${h}.lock`;
+  const a = canonicalSparkAddress(addr);
+  const h = createHash("sha256").update(a).digest("hex").slice(0, 24);
+  return `${a}__${h}.lock`;
 }
 async function ensureDir(d: string) {
   try { await fsp.mkdir(d, { recursive: true }); } catch {}

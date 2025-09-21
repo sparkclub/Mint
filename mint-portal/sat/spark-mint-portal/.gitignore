@@ -9,3 +9,4 @@
 .paymint_tx
 .next/
 .vercel/
+node_modules

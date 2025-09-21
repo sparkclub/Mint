@@ -1,12 +1,15 @@
+// src/lib/verifier.ts
 import * as cheerio from "cheerio";
 import { fetchJsonWithRetry, fetchTextWithRetry } from "./xfetch";
+import { canonicalSparkAddress, reencodeSparkAddr, looksLikeSparkAddress } from "./validate";
 
 function hyphenateTxId(s: string): string {
   const t = (s || "").trim();
-  if (!t || t.includes("-")) return t;
+  if (t.includes("-")) return t;
   const hex32 = /^[0-9a-f]{32}$/i;
-  if (!hex32.test(t)) return t;
-  return `${t.slice(0,8)}-${t.slice(8,12)}-${t.slice(12,16)}-${t.slice(16,20)}-${t.slice(20)}`;
+  return hex32.test(t)
+    ? `${t.slice(0,8)}-${t.slice(8,12)}-${t.slice(12,16)}-${t.slice(16,20)}-${t.slice(20)}`
+    : t;
 }
 
 function variants(n: bigint): string[] {
@@ -25,89 +28,100 @@ function variants(n: bigint): string[] {
 const NETWORK = (process.env.SPARK_NETWORK || "MAINNET").toUpperCase();
 const MODE = ((process.env.FEE_VERIFIER_MODE || process.env.VERIFIER_MODE || "SPARKSCAN").toUpperCase());
 
-/** === Timestamp helpers === */
+/** ===== Helpers for address normalization & variants ===== */
+function canon(addr?: string | null): string | undefined {
+  if (!addr) return undefined;
+  const a = String(addr).trim();
+  return looksLikeSparkAddress(a) ? canonicalSparkAddress(a) : a.toLowerCase();
+}
+function addrVariants(addr: string): string[] {
+  const c = canon(addr) || addr;
+  try {
+    const spark = reencodeSparkAddr(c, "spark"); 
+    return [c, spark];
+  } catch { return [c]; }
+}
 
+/** === Timestamp helpers === */
 function parseDdMmYyyyTime(s: string): number | undefined {
   const m = s.match(/\b(\d{2})[\/\-](\d{2})[\/\-](\d{4})[^\d]+(\d{2}):(\d{2})(?::(\d{2}))?/);
   if (!m) return undefined;
   const [, dd, mm, yyyy, hh, mi, ss] = m;
   const y = Number(yyyy), M = Number(mm), d = Number(dd), H = Number(hh), I = Number(mi), S = Number(ss || "0");
-  if ([y,M,d,H,I,S].some(v => !Number.isFinite(v))) return undefined;
   const t = Date.UTC(y, M - 1, d, H, I, S);
   return Number.isFinite(t) ? t : undefined;
 }
-
 function parseTsAny(v: any): number | undefined {
   if (v == null) return undefined;
-
-  if (typeof v === "number" && Number.isFinite(v)) {
-    return v > 1e12 ? Math.floor(v) : Math.floor(v * 1000);
-  }
-
+  if (typeof v === "number" && Number.isFinite(v)) return v > 1e12 ? Math.floor(v) : Math.floor(v * 1000);
   if (typeof v === "string" && /^[0-9]+(\.[0-9]+)?$/.test(v.trim())) {
-    const n = Number(v);
-    return n > 1e12 ? Math.floor(n) : Math.floor(n * 1000);
+    const n = Number(v); return n > 1e12 ? Math.floor(n) : Math.floor(n * 1000);
   }
-
   if (typeof v === "string") {
-    const p = Date.parse(v);
-    if (!Number.isNaN(p)) return p;
-
-    const t2 = parseDdMmYyyyTime(v);
-    if (t2) return t2;
+    const p = Date.parse(v); if (!Number.isNaN(p)) return p;
+    const t2 = parseDdMmYyyyTime(v); if (t2) return t2;
   }
-
   return undefined;
 }
-
 function pickFirst<T>(...vals: (T | undefined)[]): T | undefined {
   for (const v of vals) if (v !== undefined) return v;
   return undefined;
 }
-
-function extractFirstSp1(s: string): string | undefined {
-  const m = s.match(/sp1[0-9a-z]{20,}/i);
-  return m ? m[0] : undefined;
+function extractFirstSpLike(s: string): string | undefined {
+  const m = s.match(/(?:sp|spark)1[0-9a-z]{20,}/i);
+  return m ? canonicalSparkAddress(m[0]) : undefined;
 }
 
 /** =================== Verifier =================== */
-
 export async function verifyTxInvolves(
   txId: string,
-  feeAddress: string,
+  feeAddressInput: string,
   opts?: { payer?: string; amount?: bigint; minAmount?: bigint; allowGreater?: boolean }
 ): Promise<{ ok: boolean; source: "api" | "scrape" | null; reason?: string; amountSats?: bigint; fromAddress?: string }> {
-  if (!txId || !feeAddress) return { ok: false, source: null, reason: "missing_params" };
+  if (!txId || !feeAddressInput) return { ok: false, source: null, reason: "missing_params" };
   if (MODE === "NONE") return { ok: true, source: null };
+
+  const feeCanon = canon(feeAddressInput)!;                 
+  const feeAliases = addrVariants(feeCanon);              
+
+  const payerCanon = canon(opts?.payer || undefined);     
 
   const candidates = [hyphenateTxId(txId), txId].filter(Boolean);
   for (const id of candidates) {
     try {
       const url = `https://api.sparkscan.io/v1/tx/${encodeURIComponent(id)}?network=${encodeURIComponent(NETWORK)}`;
       const data: any = await fetchJsonWithRetry(url, { retries: 3, backoffMs: 600 });
-      const to = String(data?.to?.identifier ?? data?.to ?? "");
-      const from = String(data?.from?.identifier ?? data?.from ?? "");
+
+      const toRaw = String(data?.to?.identifier ?? data?.to ?? "");
+      const fromRaw = String(data?.from?.identifier ?? data?.from ?? "");
+      const toCanon   = canon(toRaw);
+      const fromCanon = canon(fromRaw);
+
       const status = String(data?.status ?? "").toLowerCase();
       const amount = data?.amountSats != null ? BigInt(String(data.amountSats)) : 0n;
 
-      if (!to || to.toLowerCase() !== feeAddress.toLowerCase()) return { ok: false, source: "api", reason: "to_mismatch" };
-      if (opts?.payer && (!from || from.toLowerCase() !== (opts.payer || "").toLowerCase()))
-        return { ok: false, source: "api", reason: "from_mismatch" };
+      if (!toCanon || toCanon !== feeCanon) {
+        return { ok: false, source: "api", reason: "to_mismatch", amountSats: amount, fromAddress: fromCanon };
+      }
+
+      if (payerCanon && (!fromCanon || fromCanon !== payerCanon)) {
+        return { ok: false, source: "api", reason: "from_mismatch", amountSats: amount, fromAddress: fromCanon };
+      }
 
       if (opts?.amount != null) {
         if (amount !== opts.amount)
-          return { ok: false, source: "api", reason: `amount_mismatch(expected=${opts.amount} got=${amount})`, amountSats: amount, fromAddress: from || undefined };
+          return { ok: false, source: "api", reason: `amount_mismatch(expected=${opts.amount} got=${amount})`, amountSats: amount, fromAddress: fromCanon };
       } else if (opts?.minAmount != null) {
         if (amount < opts.minAmount)
-          return { ok: false, source: "api", reason: `amount_below_min(expected>=${opts.minAmount} got=${amount})`, amountSats: amount, fromAddress: from || undefined };
+          return { ok: false, source: "api", reason: `amount_below_min(expected>=${opts.minAmount} got=${amount})`, amountSats: amount, fromAddress: fromCanon };
         if (opts?.allowGreater === false && amount !== opts.minAmount)
-          return { ok: false, source: "api", reason: `amount_mismatch_min(expected=${opts.minAmount} got=${amount})`, amountSats: amount, fromAddress: from || undefined };
+          return { ok: false, source: "api", reason: `amount_mismatch_min(expected=${opts.minAmount} got=${amount})`, amountSats: amount, fromAddress: fromCanon };
       }
 
       if (status && !["confirmed", "completed", "success"].includes(status))
-        return { ok: false, source: "api", reason: `bad_status(${status})`, amountSats: amount, fromAddress: from || undefined };
+        return { ok: false, source: "api", reason: `bad_status(${status})`, amountSats: amount, fromAddress: fromCanon };
 
-      return { ok: true, source: "api", amountSats: amount, fromAddress: from || undefined };
+      return { ok: true, source: "api", amountSats: amount, fromAddress: fromCanon };
     } catch {}
   }
 
@@ -117,8 +131,12 @@ export async function verifyTxInvolves(
     const $ = cheerio.load(html);
     const text = $("body").text() || "";
 
-    if (!text.includes(canonical) || !text.includes(feeAddress)) return { ok: false, source: "scrape", reason: "no_match_base" };
-    if (opts?.payer && !text.includes(opts.payer)) return { ok: false, source: "scrape", reason: "payer_not_found" };
+    if (!feeAliases.some(a => text.includes(a))) return { ok: false, source: "scrape", reason: "no_match_base" };
+
+    if (payerCanon) {
+      const payerAliases = addrVariants(payerCanon);
+      if (!payerAliases.some(a => text.includes(a))) return { ok: false, source: "scrape", reason: "payer_not_found" };
+    }
 
     if (opts?.amount != null) {
       if (!variants(opts.amount).some(v => text.includes(v))) return { ok: false, source: "scrape", reason: "amount_not_found" };
@@ -140,12 +158,17 @@ export async function verifyIncomingByAddress(
   if (!toAddress || minAmount <= 0n) return false;
   if (MODE === "NONE") return true;
 
-  const html = await fetchTextWithRetry(`https://www.sparkscan.io/address/${encodeURIComponent(toAddress)}`, { retries: 3, backoffMs: 600 });
+  const toAliases = addrVariants(canon(toAddress) || toAddress);
+  const payerAliases = payerAddress ? addrVariants(canon(payerAddress)!) : [];
+
+  const html = await fetchTextWithRetry(`https://www.sparkscan.io/address/${encodeURIComponent(toAliases[0])}`, { retries: 3, backoffMs: 600 });
   const $ = cheerio.load(html);
   const text = $("body").text() || "";
+
   const hasAmt = variants(minAmount).some((v) => text.includes(v));
   if (!hasAmt) return false;
-  if (payerAddress) return text.includes(payerAddress);
+
+  if (payerAliases.length > 0) return payerAliases.some(a => text.includes(a));
   return true;
 }
 
@@ -159,8 +182,8 @@ export async function inspectTxBasic(
     try {
       const data: any = await fetchJsonWithRetry(url, { retries: 3, backoffMs: 600 });
 
-      const to  = String(data?.to?.identifier ?? data?.to ?? "") || undefined;
-      const from= String(data?.from?.identifier ?? data?.from ?? "") || undefined;
+      const to  = canon(String(data?.to?.identifier ?? data?.to ?? "") || undefined);
+      const from= canon(String(data?.from?.identifier ?? data?.from ?? "") || undefined);
       const status = String(data?.status ?? "").toLowerCase() || undefined;
       const amount = data?.amountSats != null ? BigInt(String(data.amountSats)) : undefined;
 
@@ -194,18 +217,16 @@ export async function inspectTxBasic(
     const html = await fetchTextWithRetry(`https://www.sparkscan.io/tx/${encodeURIComponent(canonical)}`, { retries: 3, backoffMs: 600 });
 
     let ts = parseTsAny((html.match(/datetime="([^"]+)"/i) || [])[1]);
-
     if (!ts) {
       const m = html.match(/\b(1[6-9]\d{8}|2\d{9})\b/);
       if (m) ts = parseTsAny(m[1]);
     }
-
     if (!ts) {
       const m2 = html.match(/\b\d{2}[\/\-]\d{2}[\/\-]\d{4}[^\d]+\d{2}:\d{2}(:\d{2})?\b/);
       if (m2) ts = parseDdMmYyyyTime(m2[0]);
     }
 
-    const fromGuess = extractFirstSp1(html) || undefined;
+    const fromGuess = extractFirstSpLike(html) || undefined;
 
     return { ok: true, source: "scrape", fromAddress: fromGuess, toAddress: undefined, amountSats: undefined, status: undefined, timestampMs: ts };
   } catch {}
@@ -214,7 +235,6 @@ export async function inspectTxBasic(
 }
 
 /** === Holder eligibility (ID / ticker) === */
-
 function escRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -229,8 +249,9 @@ export async function addressEligibleTokens(
   if (!ids.length && !tks.length) return { matchedIds: [], matchedTickers: [] };
 
   try {
+    const target = canon(address) || address;
     const j: any = await fetchJsonWithRetry(
-      `https://api.sparkscan.io/v1/address/${encodeURIComponent(address)}?network=${encodeURIComponent(NETWORK)}`,
+      `https://api.sparkscan.io/v1/address/${encodeURIComponent(target)}?network=${encodeURIComponent(NETWORK)}`,
       { retries: 2, backoffMs: 400 }
     );
     const s = JSON.stringify(j || {}).toLowerCase();
@@ -245,15 +266,15 @@ export async function addressEligibleTokens(
   } catch {}
 
   try {
-    const html = await fetchTextWithRetry(`https://www.sparkscan.io/address/${encodeURIComponent(address)}`, { retries: 3, backoffMs: 600 });
+    const target = canon(address) || address;
+    const html = await fetchTextWithRetry(`https://www.sparkscan.io/address/${encodeURIComponent(target)}`, { retries: 3, backoffMs: 600 });
     const text = html || "";
     const matchedIds: string[] = [];
-    for (const id of ids) {
-      if (!id) continue;
-      if (text.toLowerCase().includes(id.toLowerCase())) matchedIds.push(id);
+    for (const id of (tokenIdentifiers || [])) {
+      if (id && text.toLowerCase().includes(id.toLowerCase())) matchedIds.push(id);
     }
     const matchedTickers: string[] = [];
-    for (const tk of tks) {
+    for (const tk of (tokenTickers || [])) {
       if (!tk) continue;
       const re = new RegExp(`(?:^|[^a-z0-9])${escRe(tk)}(?:[^a-z0-9]|$)`, "i");
       if (re.test(text)) matchedTickers.push(tk);
@@ -271,7 +292,8 @@ export async function addressHasAnyToken(address: string, tokenIdentifiers: stri
 
 export async function addressHasTxBefore(address: string, cutoffMs: number): Promise<boolean> {
   try {
-    const url = `https://api.sparkscan.io/v1/address/${encodeURIComponent(address)}/txs?network=${encodeURIComponent(NETWORK)}&limit=50&offset=0`;
+    const target = canon(address) || address;
+    const url = `https://api.sparkscan.io/v1/address/${encodeURIComponent(target)}/txs?network=${encodeURIComponent(NETWORK)}&limit=50&offset=0`;
     const data: any = await fetchJsonWithRetry(url, { retries: 2, backoffMs: 400 });
     const arr: any[] =
       Array.isArray(data) ? data :
@@ -294,7 +316,8 @@ export async function addressHasTxBefore(address: string, cutoffMs: number): Pro
   } catch {}
 
   try {
-    const html = await fetchTextWithRetry(`https://www.sparkscan.io/address/${encodeURIComponent(address)}`, { retries: 2, backoffMs: 400 });
+    const target = canon(address) || address;
+    const html = await fetchTextWithRetry(`https://www.sparkscan.io/address/${encodeURIComponent(target)}`, { retries: 2, backoffMs: 400 });
 
     const isoMatches = [...html.matchAll(/datetime="([^"]+)"/g)];
     for (const m of isoMatches) {

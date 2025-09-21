@@ -1,12 +1,14 @@
+// src/lib/order-token.ts
 import crypto from "node:crypto";
 
 export type OrderPayload = {
-  feeAddress: string;      
-  amount: string;           
-  since: number;            
-  receiver: string;        
-  tokenId?: string | null; 
-  payoutBase?: string | null; 
+  feeAddress: string;          
+  amount: string;             
+  since: number;
+  receiver: string;           
+  tokenId?: string | null;
+  payoutBase?: string | null;
+  tier?: 'OG' | 'STANDARD';   
 };
 
 export function makeOrderToken(data: OrderPayload, secret: string): string {

@@ -1,7 +1,8 @@
+// src/app/api/paymint/request/route.ts
 export const runtime = 'nodejs';
 
 import { NextRequest, NextResponse } from "next/server";
-import { looksLikeSparkAddress, looksLikeTokenId } from "@/lib/validate";
+import { looksLikeSparkAddress, looksLikeTokenId, canonicalSparkAddress } from "@/lib/validate";
 import { makeOrderToken, OrderPayload } from "@/lib/order-token";
 import { getSigningSecretSync } from "@/lib/signing-secret";
 import { rateLimit } from "@/lib/rate-limit";
@@ -41,15 +42,17 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json().catch(()=> ({}));
-    const receiverSparkAddress = String(body?.receiverSparkAddress || '').trim();
+    const receiverSparkAddressRaw = String(body?.receiverSparkAddress || '').trim();
+    const receiverSparkAddress = canonicalSparkAddress(receiverSparkAddressRaw);
     if (!looksLikeSparkAddress(receiverSparkAddress)) {
       return NextResponse.json({ ok:false, error:'bad_receiver' }, { status: 400 });
     }
 
-    const feeAddress = String(process.env.PAYMINT_FEE_ADDRESS || '').trim();
-    if (!looksLikeSparkAddress(feeAddress)) {
+    const feeAddressEnv = canonicalSparkAddress(String(process.env.PAYMINT_FEE_ADDRESS || '').trim());
+    if (!looksLikeSparkAddress(feeAddressEnv)) {
       return NextResponse.json({ ok:false, error:'merchant_feeAddress_not_set' }, { status: 500 });
     }
+    const feeAddress = feeAddressEnv;
 
     const tokenIdEnv = process.env.PAYMINT_PAYOUT_TOKEN_ID || null;
     const tokenId = tokenIdEnv && looksLikeTokenId(tokenIdEnv) ? tokenIdEnv : null;
@@ -79,7 +82,7 @@ export async function POST(req: NextRequest) {
     if (fcfsAvailable && !fcfsUsed) {
       suggestedTier = 'FCFS';
       requiredAmountSats = fcfsPrice.toString();
-      tierLabel = fcfsPrice === 0n ? 'FCFS Tier Free' : 'FCFS Tier Free';
+      tierLabel = 'FCFS Tier Free';
     } else {
       if (paidCohortIndex) {
         const price = cohortPrice(paidCohortIndex);

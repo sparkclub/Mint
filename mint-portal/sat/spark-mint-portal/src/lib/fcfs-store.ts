@@ -1,5 +1,7 @@
+// src/lib/fcfs-store.ts
 import { promises as fs } from "fs";
 import path from "path";
+import { canonicalSparkAddress } from "./validate";
 
 type Store = { claimed: number; used: Record<string, true> };
 
@@ -31,11 +33,12 @@ export async function peekFcfsCount() {
 }
 export async function checkFcfsUsed(addr: string) {
   const st = await load();
-  return { used: !!st.used[addr.toLowerCase()] };
+  const key = canonicalSparkAddress(addr);
+  return { used: !!st.used[key] };
 }
 export async function reserveFcfsSlot(addr: string, limit: number) {
   const st = await load();
-  const key = addr.toLowerCase();
+  const key = canonicalSparkAddress(addr);
   if (st.used[key]) return { ok: false as const, reason: "fcfs_address_used" };
   if (st.claimed >= limit) return { ok: false as const, reason: "fcfs_sold_out" };
   st.used[key] = true;
@@ -45,7 +48,7 @@ export async function reserveFcfsSlot(addr: string, limit: number) {
 }
 export async function rollbackFcfsSlot(addr: string) {
   const st = await load();
-  const key = addr.toLowerCase();
+  const key = canonicalSparkAddress(addr);
   if (st.used[key]) {
     delete st.used[key];
     if (st.claimed > 0) st.claimed -= 1;

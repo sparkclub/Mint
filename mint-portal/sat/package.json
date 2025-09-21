@@ -2,6 +2,8 @@
   "dependencies": {
     "@buildonspark/issuer-sdk": "^0.0.92",
     "@buildonspark/spark-sdk": "^0.2.13",
+    "bech32": "^2.0.0",
+    "cheerio": "^1.1.2",
     "next": "^15.5.2",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",

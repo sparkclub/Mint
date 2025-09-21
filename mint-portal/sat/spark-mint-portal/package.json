@@ -16,6 +16,7 @@
   "dependencies": {
     "@buildonspark/issuer-sdk": "^0.0.92",
     "@buildonspark/spark-sdk": "^0.2.13",
+    "bech32": "^2.0.0",
     "cheerio": "^1.1.2",
     "dotenv": "^17.2.2",
     "qrcode": "^1.5.4",
@@ -26,6 +27,7 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.1.13",
+    "@types/bech32": "^1.1.8",
     "@types/node": "^24.3.3",
     "@types/qrcode": "^1.5.5",
     "@types/react": "^19.1.13",

@@ -1,9 +1,7 @@
-import path from 'path';
-/** @type {import('next').NextConfig} */
 const nextConfig = {
-  eslint: { ignoreDuringBuilds: true },
-  typescript: { ignoreBuildErrors: true },
-  output: 'standalone',
-  outputFileTracingRoot: path.resolve(process.cwd(), '..', '..'),
+  reactStrictMode: true,
+  experimental: { serverActions: false },
+  basePath: '/mint',
+  assetPrefix: '/mint',
 };
 export default nextConfig;

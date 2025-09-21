@@ -19,7 +19,7 @@ export async function POST(req: Request) {
     if (!looksLikeTokenId(tokenIdentifier)) throw new Error("invalid btkn id");
     if (!looksLikeSparkAddress(receiverSparkAddress)) throw new Error("invalid spark address");
 
-    const paid = await verifyIncomingByAddress(feeAddress, BigInt(feeAmount), since);
+    const paid = await verifyIncomingByAddress(feeAddress, BigInt(feeAmount));
     if (!paid) throw new Error("fee not found yet");
 
     const wallet = await getIssuerWallet();

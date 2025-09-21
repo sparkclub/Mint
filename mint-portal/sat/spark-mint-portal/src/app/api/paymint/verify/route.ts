@@ -1,9 +1,10 @@
+// src/app/api/paymint/verify/route.ts
 export const runtime = 'nodejs';
 
 import { NextRequest, NextResponse } from "next/server";
 import { readOrderToken } from "@/lib/order-token";
 import { getSigningSecretSync } from "@/lib/signing-secret";
-import { looksLikeTxId, looksLikeSparkAddress, looksLikeTokenId } from "@/lib/validate";
+import { looksLikeTxId, looksLikeTokenId, looksLikeSparkAddress, canonicalSparkAddress } from "@/lib/validate";
 import { verifyTxInvolves, inspectTxBasic, addressHasTxBefore } from "@/lib/verifier";
 import { rateLimit } from "@/lib/rate-limit";
 import { mintThenTransfer } from "@/lib/mint-flow";
@@ -12,7 +13,7 @@ import { reserveFcfsSlot, rollbackFcfsSlot, peekFcfsCount, checkFcfsUsed } from 
 import { reservePaidSlot, rollbackPaidSlot, peekPaidCount } from "@/lib/paid-store";
 import { reserveOgClaim, rollbackOgClaim } from "@/lib/og-store";
 
-const SPARK_MAINNET_PREFIX = /^sp1[0-9a-z]{20,}$/i;
+const SPARK_MAINNET_PREFIX = /^(?:sp|spark)1[0-9a-z]{20,}$/i;
 
 function parseCohortSizes(): number[] {
   const csv = String(process.env.PAYMINT_COHORT_SIZES ?? "").trim();
@@ -74,7 +75,6 @@ function pickUnits(envUnits: string | undefined, envTokens: string | undefined, 
   }
   return null;
 }
-
 function ogCutoffMs(): number {
   const ms = Number(process.env.PAYMINT_OG_CUTOFF_EPOCH_MS);
   if (Number.isFinite(ms) && ms > 0) return Math.floor(ms);
@@ -102,7 +102,8 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json().catch(()=> ({}));
     const token = String(body?.token || '').trim();
-    const payerHint = String(body?.payerSparkAddress || '').trim() || undefined;
+    const payerHintRaw = String(body?.payerSparkAddress || '').trim() || undefined;
+    const payerHint = payerHintRaw ? canonicalSparkAddress(payerHintRaw) : undefined;
     const txId  = body?.txId ? String(body.txId).trim() : undefined;
 
     if (!token) return NextResponse.json({ ok:false, error:'missing token' }, { status:400 });
@@ -115,10 +116,24 @@ export async function POST(req: NextRequest) {
 
     const secret = getSigningSecretSync();
     const payload = readOrderToken(token, secret) as any;
+    const isOGToken = String(payload?.tier || '').toUpperCase() === 'OG';
 
-    const feeAddress = String(payload.feeAddress || '').trim();
-    if (!looksLikeSparkAddress(feeAddress) || !SPARK_MAINNET_PREFIX.test(feeAddress))
+    const feeAddressRaw = String(payload.feeAddress || '').trim();
+    const feeAddress = canonicalSparkAddress(feeAddressRaw);
+    if (!looksLikeSparkAddress(feeAddress))
       return NextResponse.json({ ok:false, error:'bad_payload_feeAddress_not_mainnet' }, { status:400 });
+
+    const feeAddressEnv = canonicalSparkAddress(String(process.env.PAYMINT_FEE_ADDRESS || '').trim());
+
+    if (looksLikeSparkAddress(feeAddressEnv) && feeAddressEnv !== feeAddress) {
+      return NextResponse.json({
+        ok:false,
+        error:'fee_address_changed',
+        message:'Fee address has been updated. Please click "Generate Mint Info" again and pay to the new address.',
+        expected: feeAddressEnv,
+        tokenFee: feeAddress
+      }, { status: 400 });
+    }
 
     const age = Date.now() - Number(payload.since || 0);
     if (age < MIN_AGE_MS) return NextResponse.json({ ok:false, error:'too_early', retryAfterMs: Math.max(0, MIN_AGE_MS - age) }, { status: 425 });
@@ -127,14 +142,20 @@ export async function POST(req: NextRequest) {
     const sizes = parseCohortSizes();
 
     if (!vres.ok) {
+      const reason = String(vres.reason || "");
+
+      if (MAP_PENDING_TO_TOO_EARLY && /bad_status\((sent|pending|processing)\)/i.test(reason)) {
+        const retryMs = envInt('PAYMINT_PENDING_RETRY_MS', 60_000);
+        return NextResponse.json({ ok:false, error:'too_early', source: vres.source || null, retryAfterMs: retryMs }, { status: 425 });
+      }
+
+      if (!isOGToken) {
+        return NextResponse.json({ ok:false, error: reason || 'verify_failed', source: vres.source || null }, { status: 400 });
+      }
+
       const ogEnabled = envBool('PAYMINT_OG_ENABLED', false);
       if (!ogEnabled) {
-        const reason = String(vres.reason || "");
-        if (MAP_PENDING_TO_TOO_EARLY && /bad_status\((sent|pending|processing)\)/i.test(reason)) {
-          const retryMs = envInt('PAYMINT_PENDING_RETRY_MS', 60_000);
-          return NextResponse.json({ ok:false, error:'too_early', source: vres.source || null, retryAfterMs: retryMs }, { status: 425 });
-        }
-        return NextResponse.json({ ok:false, error: reason || 'verify_failed', source: vres.source || null }, { status: 400 });
+        return NextResponse.json({ ok:false, error:'og_disabled' }, { status: 400 });
       }
 
       const basic = await inspectTxBasic(txId);
@@ -143,9 +164,10 @@ export async function POST(req: NextRequest) {
       }
 
       const cutoff = ogCutoffMs();
+      const basicFrom = basic.fromAddress ? canonicalSparkAddress(basic.fromAddress) : null;
 
       if (basic.timestampMs && basic.timestampMs < cutoff) {
-        const fromAddr = (basic.fromAddress && SPARK_MAINNET_PREFIX.test(basic.fromAddress)) ? basic.fromAddress
+        const fromAddr = (basicFrom && SPARK_MAINNET_PREFIX.test(basicFrom)) ? basicFrom
                        : (payerHint && SPARK_MAINNET_PREFIX.test(payerHint) ? payerHint : null);
         if (!fromAddr) {
           return NextResponse.json({ ok:false, error:'og_tx_invalid_no_from' }, { status: 400 });
@@ -192,10 +214,10 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      const fromAddr2 = (basic.fromAddress && SPARK_MAINNET_PREFIX.test(basic.fromAddress)) ? basic.fromAddress
+      const fromAddr2 = (basicFrom && SPARK_MAINNET_PREFIX.test(basicFrom)) ? basicFrom
                       : (payerHint && SPARK_MAINNET_PREFIX.test(payerHint) ? payerHint : null);
       if (!fromAddr2) {
-        return NextResponse.json({ ok:false, error:'og_tx_invalid', cutoffMs: cutoff, addr: basic.fromAddress || null, txTimeMs: basic.timestampMs ?? null }, { status: 400 });
+        return NextResponse.json({ ok:false, error:'og_tx_invalid', cutoffMs: cutoff, addr: basicFrom || null, txTimeMs: basic.timestampMs ?? null }, { status: 400 });
       }
 
       const eligible = await addressHasTxBefore(fromAddr2, cutoff);
@@ -214,12 +236,12 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok:true, minted:false, tier:'OG', reason:'tokenId_missing_or_bad', cutoffMs: cutoff, addr: fromAddr2, txTimeMs: basic.timestampMs ?? null }, { status: 200 });
       }
 
-      const ogUnits = pickUnits(
+      const ogUnits2 = pickUnits(
         process.env.PAYMINT_OG_PAYOUT_BASEUNITS,
         process.env.PAYMINT_OG_TOKENS,
         process.env.PAYMINT_TOKEN_DECIMALS
       );
-      if (!ogUnits) {
+      if (!ogUnits2) {
         await rollbackOgClaim(fromAddr2);
         return NextResponse.json({ ok:true, minted:false, tier:'OG', reason:'payout_baseunits_missing', cutoffMs: cutoff, addr: fromAddr2, txTimeMs: basic.timestampMs ?? null }, { status: 200 });
       }
@@ -231,13 +253,13 @@ export async function POST(req: NextRequest) {
       }
 
       try {
-        const out = await mintThenTransfer({ tokenIdentifier: tokenId, tokenAmount: ogUnits, receiverSparkAddress: fromAddr2 });
+        const out = await mintThenTransfer({ tokenIdentifier: tokenId, tokenAmount: ogUnits2, receiverSparkAddress: fromAddr2 });
         return NextResponse.json({
           ok:true, minted:true, tier:'OG',
           mintReceiver: fromAddr2,
           cutoffMs: cutoff,
           txTimeMs: basic.timestampMs ?? null,
-          payoutBaseUnits: ogUnits.toString(),
+          payoutBaseUnits: ogUnits2.toString(),
           mintTxId: out.mintTxId, transferTxId: out.transferTxId
         });
       } catch (e:any) {
@@ -246,10 +268,13 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const fromAddr = vres.fromAddress && SPARK_MAINNET_PREFIX.test(vres.fromAddress) ? vres.fromAddress : (payerHint && SPARK_MAINNET_PREFIX.test(payerHint) ? payerHint : null);
+    const vFrom = vres.fromAddress ? canonicalSparkAddress(vres.fromAddress) : null;
+    const fromAddr = vFrom && SPARK_MAINNET_PREFIX.test(vFrom)
+      ? vFrom
+      : (payerHint && SPARK_MAINNET_PREFIX.test(payerHint) ? payerHint : null);
     if (!fromAddr) return NextResponse.json({ ok:false, error:'cannot_detect_payer_address' }, { status: 400 });
-    const paidAmount = vres.amountSats ?? 0n;
 
+    const paidAmount = vres.amountSats ?? 0n;
     const claim = claimTxOnce(txId, { receiver: fromAddr, feeAddress, amount: String(paidAmount) });
     if (!claim.ok) return NextResponse.json({ ok:false, error:'tx_already_used' }, { status: 409 });
 
@@ -267,7 +292,7 @@ export async function POST(req: NextRequest) {
       const resv = await reserveFcfsSlot(fromAddr, Number(process.env.PAYMINT_COHORT_FCFS_FREE ?? '1000'));
       if (!resv.ok) {
         const paidPeek = await peekPaidCount().catch(()=>({count:0}));
-        const next = nextCohortFromCount(paidPeek.count || 0, sizes);
+        const next = nextCohortFromCount(paidPeek.count || 0, parseCohortSizes());
         claim.release();
         return NextResponse.json({
           ok:false,
